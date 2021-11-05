@@ -91,3 +91,13 @@ LOCAL_COPY_FILES := scripts/pv_e2fsgrow:lib/pv/pv_e2fsgrow \
 
 include $(BUILD_EXECUTABLE)
 
+include $(CLEAR_VARS)
+
+LOCAL_DESTDIR := ./
+LOCAL_MODULE := init-dm
+LOCAL_LIBRARIES := cryptsetup
+
+LOCAL_COPY_FILES := scripts/volmount/dm:lib/pv/volmount/dm
+
+include $(BUILD_CUSTOM)
+

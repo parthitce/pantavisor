@@ -1,0 +1,143 @@
+#!/bin/sh
+
+op=$1
+volumesrc=$2
+container=$3
+volume=$4
+
+JSON_sh=/lib/pv/JSON.sh
+
+do_mount_squash() {
+	traildir=`dirname $1`
+	squashname=`basename $1`
+	container=$2
+	dmmanifest=$traildir/_dm/$squashname.json
+	dmname=pv--dmverity--$container-${squashname%.*}
+	volpath=/volumes/$container/$squashname
+
+	if ! [ -f $dmmanifest ]; then
+		echo "ERROR: not a dm: volume ($1)"
+		return 1
+	fi
+
+	ddev=`cat $dmmanifest | $JSON_sh -l | grep data_device | awk '{ print $2 }' | sed -e 's/^"//;s/"$//'`
+	hdev=`cat $dmmanifest | $JSON_sh -l |  grep hash_device | awk '{ print $2 }' | sed -e 's/^"//;s/"$//'`
+	rhash=`cat $dmmanifest | $JSON_sh -l | grep root_hash | awk '{ print $2 }' | sed -e 's/^"//;s/"$//'`
+
+	if ! veritysetup create $dmname $traildir/$ddev $traildir/$hdev $rhash; then
+		echo "ERROR: could not setup dm volume with veritysetup"
+		return 2
+	fi
+
+
+	mkdir -p $volpath
+	if ! mount -oloop /dev/mapper/$dmname $volpath; then
+		echo "ERROR: could not setup dm volume with veritysetup"
+		return 3
+	fi
+		
+}
+
+do_umount_squash() {
+	squashname=`basename $1`
+	container=$2
+	dmname=pv--dmverity--$container-${squashname%.*}
+	volpath=/volumes/$container/$squashname
+
+	if ! umount $volpath; then
+		echo "WARNING: cannot umount volume: $volpath"
+	fi
+
+	if ! veritysetup close $dmname; then
+		echo "WARNING: cannot close verity dm $dmname"
+		echo "Does it exist in /dev/mapper?"
+		ls /dev/mapper/pv*
+	fi
+}
+
+lazyverifylist() {
+	trailstepdir=$1
+	tmpf=`mktemp -t islazyverify.jsonsh.XXXXXXXXXXX`
+	cat $trailstepdir/.pvr/json | $JSON_sh -l > $tmpf
+	cat $tmpf \
+		| grep -v \[[^[:space:]]*,[^[:space:]]*] \
+		| sed -e 's#^\["\([[:alnum:]/._-]*\)"\][[:space:]]*"\([a-f0-9]*\)"#\1 \2#;' \
+		> $tmpf.objects
+	cat $tmpf \
+		| grep -E '(,"root-volume"|,"volumes"|,"modules"|,"firmware").*"dm:' \
+		| sed -e 's/^\["\([^/]*\)\/.*[[:space:]]"dm:/\1\//;s/"$//' > $tmpf.filter
+
+	cat $tmpf.filter | while read -r line; do
+		sed -i "\#^$line #d" $tmpf.objects
+	done
+	cat $tmpf.objects | sed -e 's/.*[[:space:]]//' | sort -u
+	rm -f $tmpf $tmpf.*
+}
+
+islazyverify() {
+	trailstepdir=$1
+	obj=$2
+	tmpf=`mktemp -t islazyverify.jsonsh.XXXXXXXXXXX`
+	cat $trailstepdir/.pvr/json | $JSON_sh -l > $tmpf
+	# to start, if this object does not exist at all in trail, we fail here...
+	if ! cat $tmpf | grep -q \"$obj\"$; then
+		return 1
+	fi
+
+	# first if we have any file reference is a .fit image this wont validated
+	if cat $tmpf | grep \"$obj\"$ | awk '{print $1}' | grep -q -E "pantavisor.fit\"\]|kernel.img\"\]|pantavisor\"\]"; then
+		rm -f $tmpf $tmpf.*
+		return 0
+	fi
+
+	# second if we have any file reference this object that is not a .squashfs volume
+	# this wont be lazily validated one ...
+	if cat $tmpf | grep \"$obj\"$ | awk '{print $1}' | grep -v ".squashfs\"\]"; then
+		rm -f $tmpf $tmpf.*
+		return 1
+	fi
+
+	usagenames=`cat $tmpf |grep \"$obj\"$ | awk '{print $1}' | sed -e 's#\[\"\(.*\)\"\]#\1#'`
+
+	# also if there are any squashfs'es that are not using dm: we 
+	# also are not using lazy validation in all cases, so fail
+	for u in $usagenames; do
+		usagename=`echo $u | sed -e 's#.*/##'`
+		usagepath=`echo $u | sed -e 's#/[^/]*##'`
+		# if we find a root-volume match without dm:$usagename
+		# this object is not lazy
+		if cat $tmpf | grep \\[\"$usagepath/run.json\",\"root-volume\"\].*$usagename | grep -q -v \"dm:$usagename\"; then
+			rm -f $tmpf $tmpf.*
+			return 2
+		fi
+		# if we find a volumes match without dm:$usagename
+		# this object is also not lazy
+		if cat $tmpf | grep \\[\"$usagepath/run.json\",\"volumes\",[0-9][0-9]*\].*$usagename | grep -q -v \"dm:$usagename\"; then
+			rm -f $tmpf $tmpf.*
+			return 2
+		fi
+	done
+	rm -f $tmpf $tmpf.*
+}
+
+
+set -e
+case $op in
+	mount)
+		do_mount_squash $2 $3
+		;;
+	umount)
+		do_umount_squash $2 $3
+		;;
+	islazyverify)
+		islazyverify $2 $3
+		;;
+	lazyverifylist)
+		lazyverifylist $2
+		;;
+	*)
+		echo "WRONG command line"
+		exit 1
+		;;
+esac
+

@@ -50,6 +50,7 @@
 #include "fops.h"
 #include "addons.h"
 #include "state.h"
+#include "tsh.h"
 #include "parser/parser.h"
 #include "utils/json.h"
 #include "utils/str.h"
@@ -378,6 +379,27 @@ bool pv_storage_threshold_reached(struct pantavisor *pv)
 	return threshold_reached;
 }
 
+static int pv_storage_validate_islazy(char *traildir, char *checksum) {
+
+	int wstatus;
+	int ret;
+	char *cmd = malloc(sizeof(char) * (strlen("/lib/pv/volmount/%s islazyverify %s %s") + strlen("dm") + strlen(traildir) + strlen(checksum) + 1)); 
+
+	sprintf(cmd, "/lib/pv/volmount/%s islazyverify %s %s",
+		"dm", traildir, checksum);
+
+        tsh_run(cmd, 1, &wstatus);
+
+	if (!WIFEXITED(wstatus))
+		ret = -1;
+	else if (WEXITSTATUS(wstatus) != 0)
+		ret = 0;
+	else
+		ret = 1;
+
+	return ret;
+}
+
 int pv_storage_validate_file_checksum(char* path, char* checksum)
 {
 	int fd, ret = -1, bytes;
@@ -423,7 +445,7 @@ out:
 }
 
 
-bool pv_storage_validate_objects_object_checksum(char *checksum)
+static bool pv_storage_validate_objects_object_checksum(char *checksum)
 {
 	int len;
 	char path[PATH_MAX];
@@ -445,16 +467,32 @@ bool pv_storage_validate_trails_object_checksum(const char *rev, const char *nam
 	int len;
 	char path[PATH_MAX];
 
+
 	len = strlen("%s/trails/%s/%s") +
 		strlen(pv_config_get_storage_mntpoint()) +
 		strlen(rev) +
 		strlen(name);
+	snprintf(path, len, "%s/trails/%s",
+		pv_config_get_storage_mntpoint(),
+		rev);
+
+	if (pv_storage_validate_islazy(path, checksum) > 0) {
+		pv_log(DEBUG, "skipping checksum for lazy object in trail %s/%s", path, name);
+		return true;
+	}
+
 	snprintf(path, len, "%s/trails/%s/%s",
 		pv_config_get_storage_mntpoint(),
 		rev,
 		name);
 
-	pv_log(DEBUG, "validating checksum for object %s", path);
+	/* validate object in pool to match */
+	if (!pv_storage_validate_objects_object_checksum(checksum)) {
+		pv_log(ERROR, "object %s with checksum %s failed", name, checksum);
+		return false;
+	}
+
+	pv_log(DEBUG, "validating checksum for object in trail %s", path);
 	return !pv_storage_validate_file_checksum(path, checksum);
 }
 
